@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: satanic-kawaii-ia
+    env: python
+    buildCommand: pip install -r requirements.txt && npm install -g z-ai-web-dev-sdk
+    startCommand: python server.py
+    envVars:
+      - key: PORT
+        value: 3001
