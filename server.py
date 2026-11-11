@@ -1,4 +1,4 @@
-import os, json, base64, tempfile, requests
+import os, json, base64, requests, time
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
@@ -13,6 +13,51 @@ PAIRS = {
 
 PROMPT = """Eres un asesor profesional de trading. Analiza esta captura de un grafico de {pair} en timeframe 4H. Tu estrategia: operar a favor de tendencia 4H con confirmacion de pin bar en M15, R:B minimo 3:1, sin noticias de alto impacto. Responde SOLO en JSON valido:
 {{"tendencia_4h":"Alcista|Bajista|Lateral","estructura":"descripcion","precio_actual":"precio","soporte_cercano":"nivel","resistencia_cercana":"nivel","patron_vela":"Pin bar alcista|Pin bar bajista|Doji|Sin patron claro|Otro","patron_confirmado":"Si|No|No aplica","rsi_aproximado":"valor o No visible","mecha_dominante":"Superior larga|Inferior larga|Sin mecha|Ambas cortas","alineacion_estrategia":"Si|No|Parcial","veredicto":"OPERAR|ESPERAR|NO OPERAR","direccion":"COMPRA|VENTA|Ninguna","score":"0-100","razones_favor":["razon"],"advertencias":["advertencia"],"recomendacion":"texto detallado"}}"""
+
+def call_zai_api(api_key, prompt_text, image_data, max_retries=4):
+    """Llama a Z.ai con reintentos automáticos si el servicio está saturado."""
+    last_error = None
+    
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(
+                'https://api.z.ai/api/paas/v4/chat/completions',
+                headers={
+                    'Authorization': 'Bearer ' + api_key,
+                    'Content-Type': 'application/json'
+                },
+                json={
+                    'model': 'glm-4.6v-flash',
+                    'messages': [{
+                        'role': 'user',
+                        'content': [
+                            {'type': 'text', 'text': prompt_text},
+                            {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,' + image_data}}
+                        ]
+                    }]
+                },
+                timeout=120
+            )
+            
+            if response.status_code == 200:
+                return response.json(), None
+            
+            # Error 1305 = servicio saturado, reintentar
+            if response.status_code == 429 or '1305' in response.text or 'overloaded' in response.text.lower():
+                last_error = "Z.ai saturado (intento " + str(attempt + 1) + "/" + str(max_retries) + ")"
+                if attempt < max_retries - 1:
+                    time.sleep(5 * (attempt + 1))
+                    continue
+            
+            return None, "Error Z.ai: " + response.text[:500]
+            
+        except Exception as e:
+            last_error = str(e)
+            if attempt < max_retries - 1:
+                time.sleep(5)
+                continue
+    
+    return None, last_error or "Z.ai saturado despues de varios intentos. Intenta de nuevo en 1-2 minutos."
 
 @app.route('/api/analyze-chart', methods=['POST'])
 def analyze():
@@ -34,29 +79,11 @@ def analyze():
         
         prompt_text = PROMPT.format(pair=pair['name'])
         
-        response = requests.post(
-            'https://api.z.ai/api/paas/v4/chat/completions',
-            headers={
-                'Authorization': 'Bearer ' + api_key,
-                'Content-Type': 'application/json'
-            },
-            json={
-                'model': 'glm-4.6v-flash',
-                'messages': [{
-                    'role': 'user',
-                    'content': [
-                        {'type': 'text', 'text': prompt_text},
-                        {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,' + image_data}}
-                    ]
-                }]
-            },
-            timeout=120
-        )
+        resp_json, error = call_zai_api(api_key, prompt_text, image_data)
         
-        if response.status_code != 200:
-            return jsonify({"error":"Error Z.ai: " + response.text[:500]}), 500
+        if error:
+            return jsonify({"error":error}), 500
         
-        resp_json = response.json()
         content = resp_json.get('choices',[{}])[0].get('message',{}).get('content','')
         content = content.strip()
         if content.startswith('```json'): content = content[7:]
