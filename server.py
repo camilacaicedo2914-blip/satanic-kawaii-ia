@@ -117,6 +117,83 @@ def call_zai_api(api_key, prompt_text, image_data, max_retries=4):
 @app.route('/api/analyze-chart', methods=['POST'])
 def analyze():
     try:
+ import os, json, base64, requests, time
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+
+app = Flask(__name__)
+CORS(app)
+
+def get_real_prices():
+    try:
+        resp = requests.get('https://open.er-api.com/v6/latest/USD', timeout=10)
+        data = resp.json()
+        if data and data.get('rates'):
+            eur = data['rates']['EUR']
+            jpy = data['rates']['JPY']
+            gbp = data['rates']['GBP']
+            return {
+                'EURUSD': {'price': 1/eur, 'pipDecimals': 5, 'pipSize': 0.0001},
+                'USDJPY': {'price': jpy, 'pipDecimals': 3, 'pipSize': 0.01},
+                'GBPUSD': {'price': 1/gbp, 'pipDecimals': 5, 'pipSize': 0.0001}
+            }
+    except:
+        pass
+    return {
+        'EURUSD': {'price': 1.11866, 'pipDecimals': 5, 'pipSize': 0.0001},
+        'USDJPY': {'price': 158.555, 'pipDecimals': 3, 'pipSize': 0.01},
+        'GBPUSD': {'price': 1.33661, 'pipDecimals': 5, 'pipSize': 0.0001}
+    }
+
+PAIRS = {
+    "EURUSD": {"name":"EUR/USD","pipDecimals":5,"pipSize":0.0001},
+    "USDJPY": {"name":"USD/JPY","pipDecimals":3,"pipSize":0.01},
+    "GBPUSD": {"name":"GBP/USD","pipDecimals":5,"pipSize":0.0001}
+}
+
+PROMPT = """Eres un asesor profesional de trading. Analiza esta captura de un grafico de {pair} en timeframe 4H. Tu estrategia: operar a favor de tendencia 4H con confirmacion de pin bar en M15, R:B minimo 3:1, sin noticias de alto impacto. Responde SOLO en JSON valido:
+{{"tendencia_4h":"Alcista|Bajista|Lateral","estructura":"descripcion","precio_actual":"precio","soporte_cercano":"nivel","resistencia_cercana":"nivel","patron_vela":"Pin bar alcista|Pin bar bajista|Doji|Sin patron claro|Otro","patron_confirmado":"Si|No|No aplica","rsi_aproximado":"valor o No visible","mecha_dominante":"Superior larga|Inferior larga|Sin mecha|Ambas cortas","alineacion_estrategia":"Si|No|Parcial","veredicto":"OPERAR|ESPERAR|NO OPERAR","direccion":"COMPRA|VENTA|Ninguna","score":"0-100","razones_favor":["razon"],"advertencias":["advertencia"],"recomendacion":"texto detallado"}}"""
+
+def call_zai_api(api_key, prompt_text, image_data, max_retries=4):
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(
+                'https://api.z.ai/api/paas/v4/chat/completions',
+                headers={
+                    'Authorization': 'Bearer ' + api_key,
+                    'Content-Type': 'application/json'
+                },
+                json={
+                    'model': 'glm-4.6v-flash',
+                    'messages': [{
+                        'role': 'user',
+                        'content': [
+                            {'type': 'text', 'text': prompt_text},
+                            {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,' + image_data}}
+                        ]
+                    }]
+                },
+                timeout=120
+            )
+            if response.status_code == 200:
+                return response.json(), None
+            if response.status_code == 429 or '1305' in response.text or 'overloaded' in response.text.lower():
+                last_error = "Z.ai saturado (intento " + str(attempt + 1) + "/" + str(max_retries) + ")"
+                if attempt < max_retries - 1:
+                    time.sleep(5 * (attempt + 1))
+                    continue
+            return None, "Error Z.ai: " + response.text[:500]
+        except Exception as e:
+            last_error = str(e)
+            if attempt < max_retries - 1:
+                time.sleep(5)
+                continue
+    return None, last_error or "Z.ai saturado despues de varios intentos."
+
+@app.route('/api/analyze-chart', methods=['POST'])
+def analyze():
+    try:
         data = request.get_json()
         if not data or 'image' not in data:
             return jsonify({"error":"Falta imagen"}), 400
@@ -125,13 +202,11 @@ def analyze():
             return jsonify({"error":"Par no soportado"}), 400
         pair = PAIRS[pair_key]
         
-        # Obtener precios REALES actuales
         real_prices = get_real_prices()
         real_price = real_prices[pair_key]['price']
         pip_size = pair['pipSize']
         pip_dec = pair['pipDecimals']
         
-        # Calcular niveles dinámicos
         if pair_key == 'USDJPY':
             support = real_price - 0.50
             resistance = real_price + 0.50
@@ -148,7 +223,6 @@ def analyze():
         if not api_key:
             return jsonify({"error":"ZAI_API_KEY no configurada"}), 500
         
-        # Prompt con precios reales
         prompt_text = PROMPT.format(pair=pair['name']) + "\n\nDATOS REALES ACTUALES:\n"
         prompt_text += "- Precio actual: " + str(round(real_price, pip_dec)) + "\n"
         prompt_text += "- Soporte cercano: " + str(round(support, pip_dec)) + "\n"
