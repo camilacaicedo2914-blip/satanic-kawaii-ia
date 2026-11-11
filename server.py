@@ -124,6 +124,13 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
+import os, json, base64, requests, time
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+
+app = Flask(__name__)
+CORS(app)
+
 def get_real_prices():
     try:
         resp = requests.get('https://open.er-api.com/v6/latest/USD', timeout=10)
